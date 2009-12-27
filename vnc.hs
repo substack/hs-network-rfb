@@ -5,7 +5,7 @@ import Network (connectTo, PortID(PortNumber), HostName)
 import System.IO
 import Control.Arrow ((***))
 import Control.Applicative ((<$>))
-import Control.Monad (when, unless, join, replicateM, foldM)
+import Control.Monad (when, unless, join, replicateM, replicateM_, foldM)
 import Data.Char (ord, chr)
 import Foreign (malloc, mallocArray, peek, peekArray, Ptr)
 import qualified Data.Map as M
@@ -55,6 +55,9 @@ newRFB = RFB {
     rfbShared = True
 }
 
+hGetByte :: Handle -> IO Int
+hGetByte h = fromIntegral <$> hGetInteger h 1
+
 hGetInt :: Handle -> IO Int
 hGetInt h = fromIntegral <$> hGetInteger h 4
 
@@ -93,7 +96,7 @@ versionHandshake sock rfb = do
 
 securityHandshake :: Handshake
 securityHandshake sock rfb = do
-    secLen <- ord <$> hGetChar sock
+    secLen <- hGetByte sock
     secTypes <- map ord <$> hTake sock secLen
     
     when (secLen == 0) $ do
@@ -117,6 +120,43 @@ securityHandshake sock rfb = do
 
 initHandshake :: Handshake
 initHandshake sock rfb = do
+    -- client init sends whether or not to share the desktop
     hPutChar sock (chr $ fromEnum $ rfbShared rfb) >> hFlush sock
     
-    return rfb
+    -- server init
+    [ width, height ] <- replicateM 2 $ hGetShort sock
+    
+    [ bitsPerPixel, depth, bigEndian, trueColor ]
+        <- replicateM 3 $ hGetByte sock
+    
+    [redMax,greenMax,blueMax] <- replicateM 3 $ hGetShort sock
+    
+    [redShift,greenShift,blueShift]
+        <- replicateM 3 $ hGetByte sock
+    
+    name <- hTake sock =<< hGetInt sock
+    
+    hTake sock 3 -- padding
+    
+    let
+        pixelFormat = PixelFormat {
+            pfBitsPerPixel = bitsPerPixel, 
+            pfDepth = depth,
+            pfBigEndian = bigEndian /= 0,
+            pfTrueColor = trueColor /= 0,
+            pfRedMax = redMax,
+            pfGreenMax = greenMax,
+            pfBlueMax = blueMax,
+            pfRedShift = redShift,
+            pfGreenShift = greenShift,
+            pfBlueShift = blueShift
+        }
+        
+        fb = FrameBuffer {
+            fbWidth = width,
+            fbHeight = height,
+            fbPixelFormat = pixelFormat,
+            fbName = name
+        }
+    
+    return $ rfb { rfbFB = fb }
