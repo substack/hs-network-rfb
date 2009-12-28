@@ -7,8 +7,9 @@ import Control.Arrow ((***))
 import Control.Applicative ((<$>))
 import Control.Monad (when, unless, join, replicateM, replicateM_, foldM)
 import Data.Char (ord, chr)
-import Foreign (malloc, mallocArray, peek, peekArray, Ptr)
 import qualified Data.Map as M
+
+import System.IO.Word
 
 data SecurityType = None
     deriving (Eq, Ord, Show)
@@ -55,27 +56,6 @@ newRFB = RFB {
     rfbShared = True
 }
 
-hGetByte :: Handle -> IO Int
-hGetByte h = fromIntegral <$> hGetInteger h 1
-
-hGetInt :: Handle -> IO Int
-hGetInt h = fromIntegral <$> hGetInteger h 4
-
-hGetShort :: Handle -> IO Int
-hGetShort h = fromIntegral <$> hGetInteger h 2
-
-hGetInteger :: Handle -> Int -> IO Integer
-hGetInteger h n = do
-    let n' = ceiling $ fromIntegral n / 4
-    let max' = maxBound :: Int
-    ptr <- mallocArray n' :: IO (Ptr Int)
-    hGetBuf h ptr n
-    sum <$> zipWith (*) (iterate (* (fromIntegral max')) 1)
-        <$> map fromIntegral <$> peekArray n' ptr
-
-hTake :: Handle -> Int -> IO String
-hTake h n = replicateM n $ hGetChar h
-
 connect :: RFB -> HostName -> PortID -> IO RFB
 connect rfb host port = do
     sock <- connectTo host port
@@ -97,7 +77,7 @@ versionHandshake sock rfb = do
 securityHandshake :: Handshake
 securityHandshake sock rfb = do
     secLen <- hGetByte sock
-    secTypes <- map ord <$> hTake sock secLen
+    secTypes <- hTakeBytes sock secLen
     
     when (secLen == 0) $ do
         msg <- hTake sock =<< hGetInt sock
@@ -127,11 +107,11 @@ initHandshake sock rfb = do
     [ width, height ] <- replicateM 2 $ hGetShort sock
     
     [ bitsPerPixel, depth, bigEndian, trueColor ]
-        <- replicateM 3 $ hGetByte sock
+        <- replicateM 4 $ hGetByte sock
     
-    [redMax,greenMax,blueMax] <- replicateM 3 $ hGetShort sock
+    [ redMax, greenMax, blueMax ] <- replicateM 3 $ hGetShort sock
     
-    [redShift,greenShift,blueShift]
+    [ redShift, greenShift, blueShift ]
         <- replicateM 3 $ hGetByte sock
     
     name <- hTake sock =<< hGetInt sock
