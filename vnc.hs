@@ -60,13 +60,14 @@ connect :: RFB -> HostName -> PortID -> IO RFB
 connect rfb host port = do
     sock <- connectTo host port
     hPutStrLn sock "RFB 003.008" >> hFlush sock
-    foldM (\rfb handshake -> handshake sock rfb) rfb
+    foldM (flip ($)) rfb { rfbHandle = sock }
         [ versionHandshake, securityHandshake, initHandshake ]
 
-type Handshake = Handle -> RFB -> IO RFB
+type Handshake = RFB -> IO RFB
 
 versionHandshake :: Handshake
-versionHandshake sock rfb = do
+versionHandshake rfb = do
+    let sock = rfbHandle rfb
     version <- join (***) (read . tail) . splitAt 4 . drop 3
         <$> hGetLine sock :: IO (Int,Int)
     when (version < rfbVersion rfb) $ do
@@ -75,7 +76,8 @@ versionHandshake sock rfb = do
     return rfb
 
 securityHandshake :: Handshake
-securityHandshake sock rfb = do
+securityHandshake rfb = do
+    let sock = rfbHandle rfb
     secLen <- hGetByte sock
     secTypes <- hTakeBytes sock secLen
     
@@ -99,7 +101,8 @@ securityHandshake sock rfb = do
     return rfb
 
 initHandshake :: Handshake
-initHandshake sock rfb = do
+initHandshake rfb = do
+    let sock = rfbHandle rfb
     -- client init sends whether or not to share the desktop
     hPutChar sock (chr $ fromEnum $ rfbShared rfb) >> hFlush sock
     
