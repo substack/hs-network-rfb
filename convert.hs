@@ -1,4 +1,4 @@
-module Data.Word.Convert (Words, flipEndian) where
+module Data.Word.Convert (Words, flipEndian, isBigEndian) where
 
 import Data.Word (Word8, Word16, Word32, Word64)
 import Foreign (castPtr, peek, poke, newArray, peekArray, Ptr)
@@ -26,5 +26,10 @@ fromWords' n xs = unsafePerformIO $ do
     let ptr' = castPtr ptr
     peekArray (length xs * sizeOf x `div` (n `div` 8)) ptr'
 
+-- Flip the endianness of a single word.
 flipEndian :: Words a => a -> a
 flipEndian x = head $ fromWords $ reverse $ (fromWords [x] :: [Word8])
+
+-- True if system integers are big-endian.
+isBigEndian :: Bool
+isBigEndian = (== 1) $ head $ (fromWords ([1] :: [Int]) :: [Word8])
