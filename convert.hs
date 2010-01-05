@@ -5,8 +5,6 @@ import Foreign (castPtr, peek, poke, newArray, peekArray, Ptr)
 import Foreign.Storable (Storable, sizeOf)
 import System.IO.Unsafe (unsafePerformIO)
 
-import Data.List.Split ()
-
 class Storable a => Words a where
     fromWords :: Storable b => [b] -> [a]
 
@@ -15,10 +13,10 @@ instance Words Word16 where fromWords = fromWords' 16
 instance Words Word32 where fromWords = fromWords' 32
 instance Words Word64 where fromWords = fromWords' 64
 
--- sizeOf a Char is 4 on my system anyways
-instance Words Char where fromWords = fromWords' 32
-
-instance Words Int where fromWords = fromWords' 32
+instance Words Char where
+    fromWords = fromWords' (8 * sizeOf ('z' :: Char))
+instance Words Int where
+    fromWords = fromWords' (8 * sizeOf (0 :: Int))
 
 fromWords' :: (Storable a, Storable b) => Int -> [a] -> [b]
 fromWords' _ [] = []
