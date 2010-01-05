@@ -1,4 +1,6 @@
-module Data.Word.Convert (Words, flipEndian, isBigEndian) where
+module Data.Word.Convert (
+    Words, flipEndian, isBigEndian, toBigEndian, toLittleEndian
+) where
 
 import Data.Word (Word8, Word16, Word32, Word64)
 import Foreign (castPtr, peek, poke, newArray, peekArray, Ptr)
@@ -33,3 +35,13 @@ flipEndian x = head $ fromWords $ reverse $ (fromWords [x] :: [Word8])
 -- True if system integers are big-endian.
 isBigEndian :: Bool
 isBigEndian = (== 1) $ head $ (fromWords ([1] :: [Int]) :: [Word8])
+
+-- Convert a word from the system endianness to big-endian. If the system is
+-- already big-endian, nothing changes.
+toBigEndian :: Words a => a -> a
+toBigEndian x = if isBigEndian then x else flipEndian x
+
+-- Convert a word from the system endianness to little-endian. If the system is
+-- already little-endian, nothing changes.
+toLittleEndian :: Words a => a -> a
+toLittleEndian x = if isBigEndian then flipEndian x else x
