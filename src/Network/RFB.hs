@@ -37,7 +37,7 @@ data PixelFormat = PixelFormat {
     pfBlueShift :: Int
 } deriving (Eq, Ord, Show)
 
-type PixelData = A.Array Word16 RGB
+type PixelData = A.Array Int RGB
 type RGB = (Word8, Word8, Word8)
 
 data FrameBuffer = FrameBuffer {
@@ -152,31 +152,67 @@ hGetPixelFormat rfb = do
 hGetFrameBuffer :: RFB -> IO FrameBuffer
 hGetFrameBuffer rfb = do
     let sock = rfbHandle rfb
-    [ width, height ] <- hGetShorts sock 2
+    [ width', height' ] <- hGetWords sock 2 :: IO [Word16]
     pf <- hGetPixelFormat rfb
-    let bigEndian = pfBigEndian pf
+    let
+        bigEndian = pfBigEndian pf
+        [ width, height ] = map (endian bigEndian) [ width', height' ]
     
+    print (width, height)
     nameLen <- endian bigEndian <$> (hGetWord sock :: IO Word32)
     name <- map toEnum <$> hGetBytes sock nameLen
     
     return $ FrameBuffer {
-        fbWidth = endian bigEndian (fromIntegral width :: Word16),
-        fbHeight = endian bigEndian (fromIntegral height :: Word16),
+        fbWidth = width',
+        fbHeight = height',
         fbPixelFormat = pf,
         fbIncrement = 0,
         fbPixelData = A.listArray (0, width * height - 1) $ repeat (0,0,0),
         fbName = name
     }
 
-data FrameBufferUpdate = FrameBufferUpdate
+data Update =
+    FrameBufferUpdate [Rectangle] |
+    ColorMapUpdate |
+    BellUpdate |
+    ClipboardUpdate [Word8]
 
-requestUpdate :: RFB -> IO FrameBufferUpdate
-requestUpdate rfb = do
+data Rectangle = Rectangle {
+    rectX :: Word16,
+    rectY :: Word16,
+    rectWidth :: Word16,
+    rectHeight :: Word16,
+    rectEncoding :: Encoding
+}
+
+data Encoding =
+    RawEncoding PixelData
+
+render :: RFB -> Rectangle -> RFB
+render rfb rect = undefined
+
+getUpdate :: RFB -> IO Update
+getUpdate rfb = do
     let fb = rfbFB rfb
     let sock = rfbHandle rfb
     hPutBytes sock [ 3, fbIncrement fb ]
     hPutShorts sock [ 0, 0, fbWidth fb, fbHeight fb ]
-    return FrameBufferUpdate
+    msgType <- hGetByte sock
+    case msgType of
+        0 -> do -- framebuffer update
+            hGetByte sock -- padding
+            rectLen <- hGetShort sock -- number of rectangles
+            FrameBufferUpdate <$> replicateM rectLen (hGetRectangle rfb)
+        1 -> do -- color map update
+            fail "color map not implemented"
+            return ColorMapUpdate
+        2 -> do -- bell update
+            fail "bell not implemented"
+            return BellUpdate
+        3 -> do -- clipboard update
+            hGetBytes sock 3 -- padding
+            clip <- hGetBytes sock =<< hGetInt sock
+            return $ ClipboardUpdate clip
 
 sendKey :: RFB -> Bool -> Word32 -> IO ()
 sendKey rfb keyDown key = do
@@ -196,3 +232,30 @@ sendClipboard rfb clip = do
     hPutBytes sock [ 6, 0, 0, 0 ]
     hPutLong sock $ fromIntegral $ length clip
     hPutWords sock clip
+
+hGetRectangle :: RFB -> IO Rectangle
+hGetRectangle rfb = do
+    let sock = rfbHandle rfb
+    [ x, y, w, h ] <- hGetShorts sock 4
+    let (width, height) = (fromIntegral w, fromIntegral h)
+    encType <- hGetLong sock
+    encoding <- case encType of
+        0 -> do -- raw encoding
+            let
+                bits = pfBitsPerPixel $ fbPixelFormat $ rfbFB rfb
+                pixM = replicateM (width * height) $ do
+                    pixel <- hGetBytes sock $ bits `div` 8
+                    case bits of 
+                        24 -> return (r,g,b) where [r,g,b] = pixel
+                        32 -> return (r,g,b) where [r,g,b,_] = pixel
+                        _ -> fail $ show bits ++ " bits?"
+            RawEncoding . A.listArray (0, width * height - 1) <$> pixM
+        _ -> fail "unsupported encoding"
+    
+    return $ Rectangle {
+        rectX = x,
+        rectY = y,
+        rectWidth = w,
+        rectHeight = h,
+        rectEncoding = encoding
+    }
