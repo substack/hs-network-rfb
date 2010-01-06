@@ -170,8 +170,8 @@ hGetFrameBuffer rfb = do
 
 data FrameBufferUpdate = FrameBufferUpdate
 
-update :: RFB -> IO FrameBufferUpdate
-update rfb = do
+requestUpdate :: RFB -> IO FrameBufferUpdate
+requestUpdate rfb = do
     let fb = rfbFB rfb
     let sock = rfbHandle rfb
     hPutBytes sock [ 3, fbIncrement fb ]
@@ -189,3 +189,10 @@ sendPointer rfb buttonMask x y = do
     let sock = rfbHandle rfb
     hPutWords sock [ 5, buttonMask ]
     hPutWords sock [ x, y ]
+
+sendClipboard :: RFB -> [Word8] -> IO ()
+sendClipboard rfb clip = do
+    let sock = rfbHandle rfb
+    hPutBytes sock [ 6, 0, 0, 0 ]
+    hPutLong sock $ fromIntegral $ length clip
+    hPutWords sock clip
