@@ -1,0 +1,6 @@
+Network.RFB
+===========
+
+Haskell client library for the RFB protocol that VNC uses.
+
+http://www.realvnc.com/docs/rfbproto.pdf
