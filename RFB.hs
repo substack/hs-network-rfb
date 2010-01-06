@@ -9,9 +9,14 @@ import Control.Monad (when, unless, join, replicateM, replicateM_, foldM)
 import Data.Char (ord, chr)
 import qualified Data.Map as M
 
-import System.IO.Word
+import System.WordIO
 import Data.Word
+import Data.Word.Convert
 
+endian :: (Integral a, Words a, Num b) => Bool -> a -> b
+endian isBig = fromIntegral
+    . (if isBig then fromBigEndian else fromLittleEndian)
+    
 data SecurityType = None
     deriving (Eq, Ord, Show)
 securityTypes :: M.Map SecurityType Word8
@@ -120,9 +125,8 @@ hGetPixelFormat :: RFB -> IO PixelFormat
 hGetPixelFormat rfb = do
     let sock = rfbHandle rfb
     [ bitsPerPixel, depth, bigEndian, trueColor ] <- hGetBytes sock 4
-    [ redMax, greenMax, blueMax ] <- hGetBytes sock 4
-    [ redShift, greenShift, blueShift ] <- hGetBytes sock 4
-    
+    [ redMax, greenMax, blueMax ] <- hGetShorts sock 3 :: IO [Word16]
+    [ redShift, greenShift, blueShift ] <- hGetBytes sock 3
     hGetBytes sock 3 -- padding
     
     return $ PixelFormat {
@@ -130,9 +134,9 @@ hGetPixelFormat rfb = do
         pfDepth = depth,
         pfBigEndian = bigEndian /= 0,
         pfTrueColor = trueColor /= 0,
-        pfRedMax = redMax,
-        pfGreenMax = greenMax,
-        pfBlueMax = blueMax,
+        pfRedMax = endian (bigEndian /= 0) redMax,
+        pfGreenMax = endian (bigEndian /= 0) greenMax,
+        pfBlueMax = endian (bigEndian /= 0) blueMax,
         pfRedShift = redShift,
         pfGreenShift = greenShift,
         pfBlueShift = blueShift
@@ -142,12 +146,15 @@ hGetFrameBuffer :: RFB -> IO FrameBuffer
 hGetFrameBuffer rfb = do
     let sock = rfbHandle rfb
     [ width, height ] <- hGetShorts sock 2
-    pixelFormat <- hGetPixelFormat rfb
-    name <- map toEnum <$> (hGetBytes sock =<< hGetInt sock)
+    pf <- hGetPixelFormat rfb
+    let bigEndian = pfBigEndian pf
+    
+    nameLen <- endian bigEndian <$> (hGetWord sock :: IO Word32)
+    name <- map toEnum <$> hGetBytes sock nameLen
     
     return $ FrameBuffer {
-        fbWidth = width,
-        fbHeight = height,
-        fbPixelFormat = pixelFormat,
+        fbWidth = endian bigEndian (fromIntegral width :: Word16),
+        fbHeight = endian bigEndian (fromIntegral height :: Word16),
+        fbPixelFormat = pf,
         fbName = name
     }
