@@ -41,8 +41,8 @@ type PixelData = A.Array Int RGB
 type RGB = (Word8, Word8, Word8)
 
 data FrameBuffer = FrameBuffer {
-    fbWidth :: Word16,
-    fbHeight :: Word16,
+    fbWidth :: Int,
+    fbHeight :: Int,
     fbPixelFormat :: PixelFormat,
     fbPixelData :: PixelData,
     fbIncrement :: Word8,
@@ -152,19 +152,18 @@ hGetPixelFormat rfb = do
 hGetFrameBuffer :: RFB -> IO FrameBuffer
 hGetFrameBuffer rfb = do
     let sock = rfbHandle rfb
-    [ width', height' ] <- hGetWords sock 2 :: IO [Word16]
+    [ width', height' ] <- (hGetWords sock 2 :: IO [Word16])
     pf <- hGetPixelFormat rfb
     let
         bigEndian = pfBigEndian pf
         [ width, height ] = map (endian bigEndian) [ width', height' ]
     
-    print (width, height)
     nameLen <- endian bigEndian <$> (hGetWord sock :: IO Word32)
     name <- map toEnum <$> hGetBytes sock nameLen
     
     return $ FrameBuffer {
-        fbWidth = width',
-        fbHeight = height',
+        fbWidth = width,
+        fbHeight = height,
         fbPixelFormat = pf,
         fbIncrement = 0,
         fbPixelData = A.listArray (0, width * height - 1) $ repeat (0,0,0),
@@ -178,10 +177,10 @@ data Update =
     ClipboardUpdate [Word8]
 
 data Rectangle = Rectangle {
-    rectX :: Word16,
-    rectY :: Word16,
-    rectWidth :: Word16,
-    rectHeight :: Word16,
+    rectX :: Int,
+    rectY :: Int,
+    rectWidth :: Int,
+    rectHeight :: Int,
     rectEncoding :: Encoding
 }
 
@@ -193,15 +192,24 @@ render rfb rect = undefined
 
 getUpdate :: RFB -> IO Update
 getUpdate rfb = do
-    let fb = rfbFB rfb
-    let sock = rfbHandle rfb
+    let
+        fb = rfbFB rfb
+        sock = rfbHandle rfb
+        pf = fbPixelFormat $ rfbFB rfb
+        bigEndian = pfBigEndian pf
+    
     hPutBytes sock [ 3, fbIncrement fb ]
-    hPutShorts sock [ 0, 0, fbWidth fb, fbHeight fb ]
+    hPutShorts sock $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
+    hFlush sock
     msgType <- hGetByte sock
     case msgType of
         0 -> do -- framebuffer update
             hGetByte sock -- padding
-            rectLen <- hGetShort sock -- number of rectangles
+            
+            -- number of rectangles in the queue
+            rectLen <- endian bigEndian <$> hGetWord16 sock
+            
+            putStrLn $ "rectLen = " ++ show rectLen
             FrameBufferUpdate <$> replicateM rectLen (hGetRectangle rfb)
         1 -> do -- color map update
             fail "color map not implemented"
@@ -233,25 +241,40 @@ sendClipboard rfb clip = do
     hPutLong sock $ fromIntegral $ length clip
     hPutWords sock clip
 
+setEncodings :: RFB -> [Word32] -> IO ()
+setEncodings rfb encodings = do
+    let sock = rfbHandle rfb
+    hPutBytes sock [ 2, 0 ]
+    hPutShort sock $ fromIntegral $ length encodings
+    hPutWords sock encodings
+    hFlush sock
+
 hGetRectangle :: RFB -> IO Rectangle
 hGetRectangle rfb = do
-    let sock = rfbHandle rfb
-    [ x, y, w, h ] <- hGetShorts sock 4
-    let (width, height) = (fromIntegral w, fromIntegral h)
-    encType <- hGetLong sock
+    let
+        sock = rfbHandle rfb
+        pf = fbPixelFormat $ rfbFB rfb
+        bigEndian = pfBigEndian pf
+    
+    [ x, y, w, h ] <- map (endian bigEndian)
+        <$> (hGetWords sock 4 :: IO [Word16])
+    
+    encType <- hGetInt sock
     encoding <- case encType of
         0 -> do -- raw encoding
             let
-                bits = pfBitsPerPixel $ fbPixelFormat $ rfbFB rfb
-                pixM = replicateM (width * height) $ do
+                bits = pfBitsPerPixel pf
+                pixM = do
                     pixel <- hGetBytes sock $ bits `div` 8
                     case bits of 
                         24 -> return (r,g,b) where [r,g,b] = pixel
                         32 -> return (r,g,b) where [r,g,b,_] = pixel
                         _ -> fail $ show bits ++ " bits?"
-            RawEncoding . A.listArray (0, width * height - 1) <$> pixM
+            RawEncoding . A.listArray (0, w * h - 1)
+                <$> replicateM (w * h) pixM
         _ -> fail "unsupported encoding"
     
+    print (w,h)
     return $ Rectangle {
         rectX = x,
         rectY = y,
