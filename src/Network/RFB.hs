@@ -8,6 +8,7 @@ import Control.Applicative ((<$>))
 import Control.Monad (when, unless, join, replicateM, replicateM_, foldM)
 import Data.Char (ord, chr)
 import qualified Data.Map as M
+import Data.List.Split (splitEvery)
 
 import System.WordIO
 import Data.Word
@@ -171,7 +172,7 @@ hGetFrameBuffer rfb = do
     }
 
 data Update =
-    FrameBufferUpdate [Rectangle] |
+    FrameBufferUpdate { fbuRectangles :: [Rectangle] } |
     ColorMapUpdate |
     BellUpdate |
     ClipboardUpdate [Word8]
@@ -185,7 +186,7 @@ data Rectangle = Rectangle {
 }
 
 data Encoding =
-    RawEncoding PixelData
+    RawEncoding { rawPixels :: PixelData }
 
 render :: RFB -> Rectangle -> RFB
 render rfb rect = undefined
@@ -264,17 +265,20 @@ hGetRectangle rfb = do
         0 -> do -- raw encoding
             let
                 bits = pfBitsPerPixel pf
-                pixM = do
-                    pixel <- hGetBytes sock $ bits `div` 8
-                    case bits of 
-                        24 -> return (r,g,b) where [r,g,b] = pixel
-                        32 -> return (r,g,b) where [r,g,b,_] = pixel
-                        _ -> fail $ show bits ++ " bits?"
-            RawEncoding . A.listArray (0, w * h - 1)
-                <$> replicateM (w * h) pixM
+                bytes = bits `div` 8
+                
+                pixSplit :: [Word8] -> RGB
+                pixSplit pixel = case bits of
+                    24 -> (r,g,b) where [r,g,b] = pixel
+                    32 -> (r,g,b) where [r,g,b,_] = pixel
+             
+            RawEncoding
+                <$> A.listArray (0, w * h - 1)
+                <$> map pixSplit
+                <$> splitEvery bytes
+                <$> hGetBytes sock (w * h * bytes)
         _ -> fail "unsupported encoding"
     
-    print (w,h)
     return $ Rectangle {
         rectX = x,
         rectY = y,
