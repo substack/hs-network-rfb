@@ -13,6 +13,8 @@ import System.WordIO
 import Data.Word
 import Data.Word.Convert
 
+import qualified Data.Array as A
+
 endian :: (Integral a, Words a, Num b) => Bool -> a -> b
 endian isBig = fromIntegral
     . (if isBig then fromBigEndian else fromLittleEndian)
@@ -35,10 +37,15 @@ data PixelFormat = PixelFormat {
     pfBlueShift :: Int
 } deriving (Eq, Ord, Show)
 
+type PixelData = A.Array Word16 RGB
+type RGB = (Word8, Word8, Word8)
+
 data FrameBuffer = FrameBuffer {
-    fbWidth :: Int,
-    fbHeight :: Int,
+    fbWidth :: Word16,
+    fbHeight :: Word16,
     fbPixelFormat :: PixelFormat,
+    fbPixelData :: PixelData,
+    fbIncrement :: Word8,
     fbName :: String
 } deriving (Eq, Ord, Show)
 
@@ -156,5 +163,29 @@ hGetFrameBuffer rfb = do
         fbWidth = endian bigEndian (fromIntegral width :: Word16),
         fbHeight = endian bigEndian (fromIntegral height :: Word16),
         fbPixelFormat = pf,
+        fbIncrement = 0,
+        fbPixelData = A.listArray (0, width * height - 1) $ repeat (0,0,0),
         fbName = name
     }
+
+data FrameBufferUpdate = FrameBufferUpdate
+
+update :: RFB -> IO FrameBufferUpdate
+update rfb = do
+    let fb = rfbFB rfb
+    let sock = rfbHandle rfb
+    hPutBytes sock [ 3, fbIncrement fb ]
+    hPutShorts sock [ 0, 0, fbWidth fb, fbHeight fb ]
+    return FrameBufferUpdate
+
+sendKey :: RFB -> Bool -> Word32 -> IO ()
+sendKey rfb keyDown key = do
+    let sock = rfbHandle rfb
+    hPutBytes sock [ 4, toEnum $ fromEnum keyDown, 0, 0 ]
+    hPutWord sock key
+
+sendPointer :: RFB -> Word8 -> Word16 -> Word16 -> IO ()
+sendPointer rfb buttonMask x y = do
+    let sock = rfbHandle rfb
+    hPutWords sock [ 5, buttonMask ]
+    hPutWords sock [ x, y ]
