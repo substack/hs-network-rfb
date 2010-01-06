@@ -10,10 +10,11 @@ import Data.Char (ord, chr)
 import qualified Data.Map as M
 
 import System.IO.Word
+import Data.Word
 
 data SecurityType = None
     deriving (Eq, Ord, Show)
-securityTypes :: M.Map SecurityType Int
+securityTypes :: M.Map SecurityType Word8
 securityTypes = M.fromList [(None,1)]
 
 data PixelFormat = PixelFormat {
@@ -63,6 +64,9 @@ connect rfb host port = do
     foldM (flip ($)) rfb { rfbHandle = sock }
         [ versionHandshake, securityHandshake, initHandshake ]
 
+connect' :: HostName -> PortID -> IO RFB
+connect' = connect newRFB
+
 type Handshake = RFB -> IO RFB
 
 versionHandshake :: Handshake
@@ -79,10 +83,11 @@ securityHandshake :: Handshake
 securityHandshake rfb = do
     let sock = rfbHandle rfb
     secLen <- hGetByte sock
-    secTypes <- hTakeBytes sock secLen
+    secTypes <- hGetBytes sock secLen
     
     when (secLen == 0) $ do
-        msg <- hTake sock =<< hGetInt sock
+        msg <- map (toEnum . fromEnum)
+            <$> (hGetBytes sock =<< hGetByte sock)
         fail $ "Connection failed with message: " ++ msg
     
     let secNum = securityTypes M.! rfbSecurityType rfb
@@ -91,11 +96,12 @@ securityHandshake rfb = do
     unless (secNum `elem` secTypes) $ do
         fail "Authentication mode not supported on remote"
     
-    hPutChar sock (chr secNum) >> hFlush sock
+    hPutWord sock secNum >> hFlush sock
     
-    secRes <- hGetInt sock -- note: < (3,8) doesn't send this for None
+    -- note: < (3,8) doesn't send this for None
+    secRes <- hGetInt sock
     when (secRes /= 0) $ do
-        msg <- hTake sock =<< hGetInt sock
+        msg <- map (toEnum . fromEnum) <$> (hGetBytes sock =<< hGetByte sock)
         fail $ "Security handshake failed with message: " ++ msg
     
     return rfb
@@ -104,23 +110,20 @@ initHandshake :: Handshake
 initHandshake rfb = do
     let sock = rfbHandle rfb
     -- client init sends whether or not to share the desktop
-    hPutChar sock (chr $ fromEnum $ rfbShared rfb) >> hFlush sock
+    hPutByte sock (toEnum $ fromEnum $ rfbShared rfb) >> hFlush sock
     
     -- server init
-    fb <- hGetFrameBuffer sock
+    fb <- hGetFrameBuffer rfb
     return $ rfb { rfbFB = fb }
+ 
+hGetPixelFormat :: RFB -> IO PixelFormat
+hGetPixelFormat rfb = do
+    let sock = rfbHandle rfb
+    [ bitsPerPixel, depth, bigEndian, trueColor ] <- hGetBytes sock 4
+    [ redMax, greenMax, blueMax ] <- hGetBytes sock 4
+    [ redShift, greenShift, blueShift ] <- hGetBytes sock 4
     
-hGetPixelFormat :: Handle -> IO PixelFormat
-hGetPixelFormat sock = do
-    [ bitsPerPixel, depth, bigEndian, trueColor ]
-        <- replicateM 4 $ hGetByte sock
-    
-    [ redMax, greenMax, blueMax ] <- replicateM 3 $ hGetShort sock
-    
-    [ redShift, greenShift, blueShift ]
-        <- replicateM 3 $ hGetByte sock
-    
-    hTake sock 3 -- padding
+    hGetBytes sock 3 -- padding
     
     return $ PixelFormat {
         pfBitsPerPixel = bitsPerPixel, 
@@ -135,11 +138,12 @@ hGetPixelFormat sock = do
         pfBlueShift = blueShift
     }
 
-hGetFrameBuffer :: Handle -> IO FrameBuffer
-hGetFrameBuffer sock = do
-    [ width, height ] <- replicateM 2 $ hGetShort sock
-    pixelFormat <- hGetPixelFormat sock
-    name <- hTake sock =<< hGetInt sock
+hGetFrameBuffer :: RFB -> IO FrameBuffer
+hGetFrameBuffer rfb = do
+    let sock = rfbHandle rfb
+    [ width, height ] <- hGetShorts sock 2
+    pixelFormat <- hGetPixelFormat rfb
+    name <- map toEnum <$> (hGetBytes sock =<< hGetInt sock)
     
     return $ FrameBuffer {
         fbWidth = width,
