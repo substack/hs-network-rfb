@@ -1,5 +1,4 @@
--- 
-module Main where
+module Network.RFB where
 
 import Network (connectTo, PortID(PortNumber), HostName)
 import System.IO
@@ -42,8 +41,10 @@ data PixelFormat = PixelFormat {
 fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
 fromRGBA size pixels = do
     im <- GD.newImage size
-    let xy = uncurry (liftM2 (,)) $ join (***) (enumFromTo 0 . pred) size
-    let px = map fromIntegral pixels
+    let
+        xy = uncurry (liftM2 $ flip (,))
+            $ join (***) (enumFromTo 0 . pred) size
+        px = map fromIntegral pixels
     sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
     return im
 
@@ -273,8 +274,10 @@ hGetRectangle rfb = do
         0 -> do -- raw encoding
             let bits = pfBitsPerPixel pf
             case bits of
-                32 -> return . RawEncoding
-                    =<< fromRGBA (w,h) =<< hGetInts sock (w * h)
+                32 -> fmap RawEncoding . fromRGBA (w,h)
+                    =<< map (endian bigEndian)
+                    <$> (hGetInts sock (w * h) :: IO [Word32])
+                    
                 _ -> fail $ "unsupported bits per pixel: " ++ show bits
         _ -> fail "unsupported encoding"
     
