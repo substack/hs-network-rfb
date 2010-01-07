@@ -5,7 +5,8 @@ import Network (connectTo, PortID(PortNumber), HostName)
 import System.IO
 import Control.Arrow ((***))
 import Control.Applicative ((<$>))
-import Control.Monad (when, unless, join, replicateM, replicateM_, foldM)
+import Control.Monad (when, unless, join, replicateM, foldM, msum, liftM2)
+
 import Data.Char (ord, chr)
 import qualified Data.Map as M
 import Data.List.Split (splitEvery)
@@ -14,7 +15,7 @@ import System.WordIO
 import Data.Word
 import Data.Word.Convert
 
-import qualified Data.Array as A
+import qualified Graphics.GD as GD
 
 endian :: (Integral a, Words a, Num b) => Bool -> a -> b
 endian isBig = fromIntegral
@@ -36,19 +37,24 @@ data PixelFormat = PixelFormat {
     pfRedShift :: Int,
     pfGreenShift :: Int,
     pfBlueShift :: Int
-} deriving (Eq, Ord, Show)
+}
 
-type PixelData = A.Array Int RGB
-type RGB = (Word8, Word8, Word8)
+fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
+fromRGBA size pixels = do
+    im <- GD.newImage size
+    let xy = uncurry (liftM2 (,)) $ join (***) (enumFromTo 0 . pred) size
+    let px = map fromIntegral pixels
+    sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
+    return im
 
 data FrameBuffer = FrameBuffer {
     fbWidth :: Int,
     fbHeight :: Int,
     fbPixelFormat :: PixelFormat,
-    fbPixelData :: PixelData,
+    fbImage :: GD.Image,
     fbIncrement :: Word8,
     fbName :: String
-} deriving (Eq, Ord, Show)
+}
 
 data RFB = RFB {
     rfbHandle :: Handle,
@@ -161,13 +167,14 @@ hGetFrameBuffer rfb = do
     
     nameLen <- endian bigEndian <$> (hGetWord sock :: IO Word32)
     name <- map toEnum <$> hGetBytes sock nameLen
+    im <- GD.newImage (width,height)
     
     return $ FrameBuffer {
         fbWidth = width,
         fbHeight = height,
         fbPixelFormat = pf,
         fbIncrement = 0,
-        fbPixelData = A.listArray (0, width * height - 1) $ repeat (0,0,0),
+        fbImage = im,
         fbName = name
     }
 
@@ -178,18 +185,23 @@ data Update =
     ClipboardUpdate [Word8]
 
 data Rectangle = Rectangle {
-    rectX :: Int,
-    rectY :: Int,
-    rectWidth :: Int,
-    rectHeight :: Int,
+    rectPos :: GD.Point,
+    rectSize :: GD.Size,
     rectEncoding :: Encoding
 }
 
 data Encoding =
-    RawEncoding { rawPixels :: PixelData }
+    RawEncoding { rawImage :: GD.Image }
 
-render :: RFB -> Rectangle -> RFB
-render rfb rect = undefined
+render :: RFB -> Rectangle -> IO RFB
+render rfb rect = do
+    let fb = rfbFB rfb
+    case rectEncoding rect of
+        RawEncoding { rawImage = im } -> do
+            GD.copyRegion
+                (0,0) (rectSize rect) im
+                (rectPos rect) (fbImage fb)
+            return $ rfb { rfbFB = fb { fbIncrement = succ $ fbIncrement fb } }
 
 getUpdate :: RFB -> IO Update
 getUpdate rfb = do
@@ -206,11 +218,7 @@ getUpdate rfb = do
     case msgType of
         0 -> do -- framebuffer update
             hGetByte sock -- padding
-            
-            -- number of rectangles in the queue
             rectLen <- endian bigEndian <$> hGetWord16 sock
-            
-            putStrLn $ "rectLen = " ++ show rectLen
             FrameBufferUpdate <$> replicateM rectLen (hGetRectangle rfb)
         1 -> do -- color map update
             fail "color map not implemented"
@@ -263,26 +271,15 @@ hGetRectangle rfb = do
     encType <- hGetInt sock
     encoding <- case encType of
         0 -> do -- raw encoding
-            let
-                bits = pfBitsPerPixel pf
-                bytes = bits `div` 8
-                
-                pixSplit :: [Word8] -> RGB
-                pixSplit pixel = case bits of
-                    24 -> (r,g,b) where [r,g,b] = pixel
-                    32 -> (r,g,b) where [r,g,b,_] = pixel
-             
-            RawEncoding
-                <$> A.listArray (0, w * h - 1)
-                <$> map pixSplit
-                <$> splitEvery bytes
-                <$> hGetBytes sock (w * h * bytes)
+            let bits = pfBitsPerPixel pf
+            case bits of
+                32 -> return . RawEncoding
+                    =<< fromRGBA (w,h) =<< hGetInts sock (w * h)
+                _ -> fail $ "unsupported bits per pixel: " ++ show bits
         _ -> fail "unsupported encoding"
     
     return $ Rectangle {
-        rectX = x,
-        rectY = y,
-        rectWidth = w,
-        rectHeight = h,
+        rectPos = (x,y),
+        rectSize = (w,h),
         rectEncoding = encoding
     }
