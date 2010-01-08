@@ -20,6 +20,9 @@ import Foreign.C.Types (CInt)
 endian :: (Integral a, Words a, Num b) => Bool -> a -> b
 endian isBig = fromIntegral
     . (if isBig then fromBigEndian else fromLittleEndian)
+
+endian' :: (Integral a, Words a, Num b) => RFB -> a -> b
+endian' = endian . pfBigEndian . fbPixelFormat . rfbFB
     
 data SecurityType = None
     deriving (Eq, Ord, Show)
@@ -41,10 +44,10 @@ data PixelFormat = PixelFormat {
 
 fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
 fromRGBA size@(w,h) pixels = do
-    im <- GD.newImage size
     let
         xy = [ (x,y) | y <- [ 0 .. h - 1 ], x <- [ 0 .. w - 1 ] ]
         px = map fromIntegral pixels :: [CInt]
+    im <- GD.newImage size
     sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
     return im
 
@@ -162,11 +165,9 @@ hGetFrameBuffer rfb = do
     let sock = rfbHandle rfb
     [ width', height' ] <- (hGetWords sock 2 :: IO [Word16])
     pf <- hGetPixelFormat rfb
-    let
-        bigEndian = pfBigEndian pf
-        [ width, height ] = map (endian bigEndian) [ width', height' ]
+    let [ width, height ] = map (endian $ pfBigEndian pf) [ width', height' ]
     
-    nameLen <- endian bigEndian <$> (hGetWord sock :: IO Word32)
+    nameLen <- (endian $ pfBigEndian pf) <$> (hGetWord sock :: IO Word32)
     name <- map toEnum <$> hGetBytes sock nameLen
     im <- GD.newImage (width,height)
     
@@ -206,11 +207,8 @@ render rfb rect = do
 
 getUpdate :: RFB -> IO Update
 getUpdate rfb = do
-    let
-        fb = rfbFB rfb
-        sock = rfbHandle rfb
-        pf = fbPixelFormat $ rfbFB rfb
-        bigEndian = pfBigEndian pf
+    let fb = rfbFB rfb
+    let sock = rfbHandle rfb
     
     hPutBytes sock [ 3, fbIncrement fb ]
     hPutShorts sock $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
@@ -219,7 +217,8 @@ getUpdate rfb = do
     case msgType of
         0 -> do -- framebuffer update
             hGetByte sock -- padding
-            rectLen <- endian bigEndian <$> hGetWord16 sock
+            rectLen <- endian' rfb <$> hGetWord16 sock
+            print rectLen
             FrameBufferUpdate <$> replicateM rectLen (hGetRectangle rfb)
         1 -> do -- color map update
             fail "color map not implemented"
@@ -232,11 +231,16 @@ getUpdate rfb = do
             clip <- hGetBytes sock =<< hGetInt sock
             return $ ClipboardUpdate clip
 
-sendKey :: RFB -> Bool -> Word32 -> IO ()
-sendKey rfb keyDown key = do
+sendKeyEvent :: RFB -> Bool -> Word32 -> IO ()
+sendKeyEvent rfb keyDown key = do
     let sock = rfbHandle rfb
     hPutBytes sock [ 4, toEnum $ fromEnum keyDown, 0, 0 ]
-    hPutWord sock key
+    hPutWord sock (endian' rfb key :: Word32)
+    hFlush sock
+
+sendKeyPress :: RFB -> Word32 -> IO ()
+sendKeyPress rfb key =
+    sendKeyEvent rfb True key >> sendKeyEvent rfb False key
 
 sendPointer :: RFB -> Word8 -> Word16 -> Word16 -> IO ()
 sendPointer rfb buttonMask x y = do
@@ -264,15 +268,14 @@ hGetRectangle rfb = do
     let
         sock = rfbHandle rfb
         pf = fbPixelFormat $ rfbFB rfb
-        bigEndian = pfBigEndian pf
+        bits = pfBitsPerPixel pf
     
-    [ x, y, w, h ] <- map (endian bigEndian)
+    [ x, y, w, h ] <- map (endian' rfb)
         <$> (hGetWords sock 4 :: IO [Word16])
     
     encType <- hGetInt sock
     encoding <- case encType of
         0 -> do -- raw encoding
-            let bits = pfBitsPerPixel pf
             case bits of
                 32 -> fmap RawEncoding . fromRGBA (w,h)
                     =<< (hGetInts sock (w * h) :: IO [Word32])
