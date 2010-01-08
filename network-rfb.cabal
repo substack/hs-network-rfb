@@ -1,5 +1,5 @@
 Name:                network-rfb
-Version:             0.1.1
+Version:             0.1.2
 Description:         Client library for the RFB protocol that VNC uses
 License:             BSD3
 Author:              James Halliday

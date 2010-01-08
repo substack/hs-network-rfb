@@ -214,7 +214,6 @@ getUpdate rfb = do
         0 -> do -- framebuffer update
             hGetByte sock -- padding
             rectLen <- endian' rfb <$> hGetWord16 sock
-            print rectLen
             FrameBufferUpdate <$> replicateM rectLen (hGetRectangle rfb)
         1 -> do -- color map update
             fail "color map not implemented"
