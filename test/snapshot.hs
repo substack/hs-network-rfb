@@ -7,5 +7,5 @@ main :: IO ()
 main = do
     rfb <- connect' "localhost" $ PortNumber 5900
     update <- getUpdate rfb
-    foldM render rfb $ fbuRectangles update
+    mapM_ (render rfb) $ fbuRectangles update
     GD.savePngFile "fb.png" $ fbImage $ rfbFB rfb

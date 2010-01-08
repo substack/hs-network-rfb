@@ -56,7 +56,6 @@ data FrameBuffer = FrameBuffer {
     fbHeight :: Int,
     fbPixelFormat :: PixelFormat,
     fbImage :: GD.Image,
-    fbIncrement :: Word8,
     fbName :: String
 }
 
@@ -175,7 +174,6 @@ hGetFrameBuffer rfb = do
         fbWidth = width,
         fbHeight = height,
         fbPixelFormat = pf,
-        fbIncrement = 0,
         fbImage = im,
         fbName = name
     }
@@ -195,7 +193,7 @@ data Rectangle = Rectangle {
 data Encoding =
     RawEncoding { rawImage :: GD.Image }
 
-render :: RFB -> Rectangle -> IO RFB
+render :: RFB -> Rectangle -> IO ()
 render rfb rect = do
     let fb = rfbFB rfb
     case rectEncoding rect of
@@ -203,14 +201,12 @@ render rfb rect = do
             GD.copyRegion
                 (0,0) (rectSize rect) im
                 (rectPos rect) (fbImage fb)
-            return $ rfb { rfbFB = fb { fbIncrement = succ $ fbIncrement fb } }
 
 getUpdate :: RFB -> IO Update
 getUpdate rfb = do
     let fb = rfbFB rfb
     let sock = rfbHandle rfb
-    
-    hPutBytes sock [ 3, fbIncrement fb ]
+    hPutBytes sock [ 3, 1 ]
     hPutShorts sock $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
     hFlush sock
     msgType <- hGetByte sock
@@ -231,6 +227,10 @@ getUpdate rfb = do
             clip <- hGetBytes sock =<< hGetInt sock
             return $ ClipboardUpdate clip
 
+{-
+    You can import Graphics.X11.Types
+    and have access to all the xK_ Word32 constants.
+-}
 sendKeyEvent :: RFB -> Bool -> Word32 -> IO ()
 sendKeyEvent rfb keyDown key = do
     let sock = rfbHandle rfb

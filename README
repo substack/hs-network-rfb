@@ -3,4 +3,8 @@ Network.RFB
 
 Haskell client library for the RFB protocol that VNC uses.
 
+Example with QEMU:
+    
+
+The protocol is documented at:
 http://www.realvnc.com/docs/rfbproto.pdf
