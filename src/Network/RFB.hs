@@ -15,6 +15,7 @@ import Data.Word
 import Data.Word.Convert
 
 import qualified Graphics.GD as GD
+import Foreign.C.Types (CInt)
 
 endian :: (Integral a, Words a, Num b) => Bool -> a -> b
 endian isBig = fromIntegral
@@ -39,12 +40,11 @@ data PixelFormat = PixelFormat {
 }
 
 fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
-fromRGBA size pixels = do
+fromRGBA size@(w,h) pixels = do
     im <- GD.newImage size
     let
-        xy = uncurry (liftM2 $ flip (,))
-            $ join (***) (enumFromTo 0 . pred) size
-        px = map fromIntegral pixels
+        xy = [ (x,y) | y <- [ 0 .. h - 1 ], x <- [ 0 .. w - 1 ] ]
+        px = map fromIntegral pixels :: [CInt]
     sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
     return im
 
@@ -275,8 +275,7 @@ hGetRectangle rfb = do
             let bits = pfBitsPerPixel pf
             case bits of
                 32 -> fmap RawEncoding . fromRGBA (w,h)
-                    =<< map (endian bigEndian)
-                    <$> (hGetInts sock (w * h) :: IO [Word32])
+                    =<< (hGetInts sock (w * h) :: IO [Word32])
                     
                 _ -> fail $ "unsupported bits per pixel: " ++ show bits
         _ -> fail "unsupported encoding"
