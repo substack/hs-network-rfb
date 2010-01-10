@@ -6,9 +6,12 @@ import System.Environment (getArgs)
 
 main :: IO ()
 main = do
-    (host:port:file:_) <- getArgs
-    rfb <- connect' host (PortNumber $ read port)
-    update <- getUpdate rfb
-    mapM_ (render rfb) $ fbuRectangles update
-    GD.savePngFile file $ fbImage $ rfbFB rfb
-    putStrLn $ "Saved image to " ++ file
+    (host:port':file:_) <- getArgs
+    let port = PortNumber $ fromIntegral $ read port'
+    snapshot host port file
+
+snapshot :: String -> PortID -> FilePath -> IO ()
+snapshot host port file = do
+    rfb <- connect' host port
+    renderImage' rfb =<< rectangles `liftM` getUpdate rfb
+    GD.savePngFile file =<< getImage rfb

@@ -6,7 +6,7 @@ module Network.RFB (
     PortID(..), -- from Network
     
     -- functions
-    connect, connect', render, getUpdate, newRFB,
+    connect, connect', getUpdate, getImage, renderImage, renderImage', newRFB,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
 ) where
 
@@ -26,6 +26,9 @@ import Data.Word.Convert
 
 import qualified Graphics.GD as GD
 import Foreign.C.Types (CInt)
+
+import Control.Concurrent.STM.TMVar
+import Control.Monad.STM (atomically)
 
 endian :: (Integral a, Words a, Num b) => Bool -> a -> b
 endian isBig = fromIntegral
@@ -56,7 +59,7 @@ data FrameBuffer = FrameBuffer {
     fbWidth :: Int,
     fbHeight :: Int,
     fbPixelFormat :: PixelFormat,
-    fbImage :: GD.Image,
+    fbImage :: TMVar GD.Image,
     fbName :: String
 }
 
@@ -71,7 +74,7 @@ data RFB = RFB {
 }
 
 data Update =
-    FrameBufferUpdate { fbuRectangles :: [Rectangle] } |
+    FrameBufferUpdate { rectangles :: [Rectangle] } |
     ColorMapUpdate |
     BellUpdate |
     ClipboardUpdate [Word8]
@@ -192,7 +195,7 @@ hGetFrameBuffer rfb = do
     
     nameLen <- (endian $ pfBigEndian pf) <$> (hGetWord sock :: IO Word32)
     name <- map toEnum <$> hGetBytes sock nameLen
-    im <- GD.newImage (width,height)
+    im <- atomically =<< newTMVar <$> GD.newImage (width,height)
     
     return $ FrameBuffer {
         fbWidth = width,
@@ -202,14 +205,23 @@ hGetFrameBuffer rfb = do
         fbName = name
     }
 
-render :: RFB -> Rectangle -> IO ()
-render rfb rect = do
+renderImage :: RFB -> Rectangle -> IO ()
+renderImage rfb rect = do
     let fb = rfbFB rfb
     case rectEncoding rect of
-        RawEncoding { rawImage = im } -> do
+        RawEncoding { rawImage = srcIm } -> do
+            let tm = fbImage fb
+            dstIm <- atomically $ takeTMVar tm
             GD.copyRegion
-                (0,0) (rectSize rect) im
-                (rectPos rect) (fbImage fb)
+                (0,0) (rectSize rect) srcIm
+                (rectPos rect) dstIm
+            atomically $ putTMVar tm dstIm
+
+renderImage' :: RFB -> [Rectangle] -> IO ()
+renderImage' rfb = mapM_ (renderImage rfb)
+
+getImage :: RFB -> IO GD.Image
+getImage rfb = atomically $ readTMVar $ fbImage $ rfbFB rfb
 
 getUpdate :: RFB -> IO Update
 getUpdate rfb = do
