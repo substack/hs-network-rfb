@@ -1,7 +1,16 @@
-module Network.RFB where
+module Network.RFB (
+    -- data types
+    SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
+    Rectangle(..), Encoding(..),
+    
+    PortID(..), -- from Network
+    
+    -- functions
+    connect, connect', render, getUpdate, newRFB,
+    sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
+) where
 
-import Network (connectTo, PortID(PortNumber), HostName)
-import System.IO
+import Network (connectTo, PortID(..), HostName)
 import Control.Arrow ((***))
 import Control.Applicative ((<$>))
 import Control.Monad (when, unless, join, replicateM, foldM, msum, liftM2)
@@ -10,6 +19,7 @@ import Data.Char (ord, chr)
 import qualified Data.Map as M
 import Data.List.Split (splitEvery)
 
+import System.IO (Handle(..), hGetLine, hPutStrLn, hFlush)
 import System.WordIO
 import Data.Word
 import Data.Word.Convert
@@ -40,16 +50,7 @@ data PixelFormat = PixelFormat {
     pfRedShift :: Int,
     pfGreenShift :: Int,
     pfBlueShift :: Int
-}
-
-fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
-fromRGBA size@(w,h) pixels = do
-    let
-        xy = [ (x,y) | y <- [ 0 .. h - 1 ], x <- [ 0 .. w - 1 ] ]
-        px = map fromIntegral pixels :: [CInt]
-    im <- GD.newImage size
-    sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
-    return im
+} deriving (Read, Show, Eq)
 
 data FrameBuffer = FrameBuffer {
     fbWidth :: Int,
@@ -68,6 +69,30 @@ data RFB = RFB {
     rfbPort :: PortID,
     rfbShared :: Bool
 }
+
+data Update =
+    FrameBufferUpdate { fbuRectangles :: [Rectangle] } |
+    ColorMapUpdate |
+    BellUpdate |
+    ClipboardUpdate [Word8]
+
+data Rectangle = Rectangle {
+    rectPos :: GD.Point,
+    rectSize :: GD.Size,
+    rectEncoding :: Encoding
+}
+
+data Encoding =
+    RawEncoding { rawImage :: GD.Image }
+
+fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
+fromRGBA size@(w,h) pixels = do
+    let
+        xy = [ (x,y) | y <- [ 0 .. h - 1 ], x <- [ 0 .. w - 1 ] ]
+        px = map fromIntegral pixels :: [CInt]
+    im <- GD.newImage size
+    sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
+    return im
 
 newRFB = RFB {
     rfbHandle = undefined,
@@ -125,7 +150,6 @@ securityHandshake rfb = do
     when (secRes /= 0) $ do
         msg <- map (toEnum . fromEnum) <$> (hGetBytes sock =<< hGetByte sock)
         fail $ "Security handshake failed with message: " ++ msg
-    
     return rfb
 
 initHandshake :: Handshake
@@ -177,21 +201,6 @@ hGetFrameBuffer rfb = do
         fbImage = im,
         fbName = name
     }
-
-data Update =
-    FrameBufferUpdate { fbuRectangles :: [Rectangle] } |
-    ColorMapUpdate |
-    BellUpdate |
-    ClipboardUpdate [Word8]
-
-data Rectangle = Rectangle {
-    rectPos :: GD.Point,
-    rectSize :: GD.Size,
-    rectEncoding :: Encoding
-}
-
-data Encoding =
-    RawEncoding { rawImage :: GD.Image }
 
 render :: RFB -> Rectangle -> IO ()
 render rfb rect = do
