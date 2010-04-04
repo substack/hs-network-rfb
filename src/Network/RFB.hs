@@ -1,17 +1,12 @@
 module Network.RFB (
-    -- data types
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
-    Rectangle(..), Encoding(..),
-    
-    PortID(..), -- from Network
-    
-    -- functions
+    Rectangle(..), Encoding(..), PortID(..),
     connect, connect', getUpdate, getImage, renderImage, renderImage', newRFB,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
 ) where
 
 import Network (connectTo, PortID(..), HostName)
-import Control.Arrow ((***))
+import Control.Arrow ((***),(&&&))
 import Control.Applicative ((<$>))
 import Control.Monad (when, unless, join, replicateM, foldM, msum, liftM2)
 
@@ -20,9 +15,13 @@ import qualified Data.Map as M
 import Data.List.Split (splitEvery)
 
 import System.IO (Handle(..), hGetLine, hPutStrLn, hFlush)
-import System.WordIO
-import Data.Word
-import Data.Word.Convert
+import Data.Binary.Get (
+    Get(..),runGet,skip,getBytes,getWord8,getWord16be,getWord32be)
+import Data.Binary.Put (
+    runPut,putWord8,putWord16be,putWord32be,putWord64be,putByteString)
+
+import Data.ByteString.Lazy (ByteString,hGet,hPut)
+import Data.Word (Word8,Word16,Word32,Word64)
 
 import qualified Graphics.GD as GD
 import Foreign.C.Types (CInt)
@@ -30,13 +29,10 @@ import Foreign.C.Types (CInt)
 import Control.Concurrent.STM.TMVar
 import Control.Monad.STM (atomically)
 
-endian :: (Integral a, Words a, Num b) => Bool -> a -> b
-endian isBig = fromIntegral
-    . (if isBig then fromBigEndian else fromLittleEndian)
+data GetBytes a = GetBytes Int (Get a)
+runGetBytes :: Handle -> GetBytes a -> IO a
+runGetBytes fh (GetBytes size f) = runGet f <$> hGet fh size
 
-endian' :: (Integral a, Words a, Num b) => RFB -> a -> b
-endian' = endian . pfBigEndian . fbPixelFormat . rfbFB
-    
 data SecurityType = None
     deriving (Eq, Ord, Show)
 securityTypes :: M.Map SecurityType Word8
@@ -86,7 +82,8 @@ data Rectangle = Rectangle {
 }
 
 data Encoding =
-    RawEncoding { rawImage :: GD.Image }
+    RawEncoding { rawImage :: ByteString } |
+    CopyRectEncoding { copyRectPos :: GD.Point }
 
 fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
 fromRGBA size@(w,h) pixels = do
@@ -130,14 +127,13 @@ versionHandshake rfb = do
     return rfb
 
 securityHandshake :: Handshake
-securityHandshake rfb = do
-    let sock = rfbHandle rfb
-    secLen <- hGetByte sock
-    secTypes <- hGetBytes sock secLen
+securityHandshake rfb@RFB{ rfbHandle = sock } = do
+    secLen <- hGet sock 1
+    secTypes <- hGet sock secLen
     
     when (secLen == 0) $ do
         msg <- map (toEnum . fromEnum)
-            <$> (hGetBytes sock =<< hGetByte sock)
+            <$> (hGet sock =<< hGet sock 1)
         fail $ "Connection failed with message: " ++ msg
     
     let secNum = securityTypes M.! rfbSecurityType rfb
@@ -146,12 +142,12 @@ securityHandshake rfb = do
     unless (secNum `elem` secTypes) $ do
         fail "Authentication mode not supported on remote"
     
-    hPutWord sock secNum >> hFlush sock
+    runPut (putWord8 secNum) >> hFlush sock
     
     -- note: < (3,8) doesn't send this for None
-    secRes <- hGetInt sock
+    secRes <- runGet getWord32be =<< hGet sock 4
     when (secRes /= 0) $ do
-        msg <- map (toEnum . fromEnum) <$> (hGetBytes sock =<< hGetByte sock)
+        msg <- map (toEnum . fromEnum) <$> (hGet sock =<< hGet sock 1)
         fail $ "Security handshake failed with message: " ++ msg
     return rfb
 
@@ -159,51 +155,47 @@ initHandshake :: Handshake
 initHandshake rfb = do
     let sock = rfbHandle rfb
     -- client init sends whether or not to share the desktop
-    hPutByte sock (toEnum $ fromEnum $ rfbShared rfb) >> hFlush sock
+    hPut sock (toEnum $ fromEnum $ rfbShared rfb) >> hFlush sock
     
     -- server init
-    fb <- hGetFrameBuffer rfb
-    return $ rfb { rfbFB = fb }
+    fb <- runGetBytes =<< (parseFrameBuffer <$> hGet sock 24)
+    im <- atomically =<< newTMVar <$> GD.newImage (fbWidth &&& fbHeight $ fb)
+    return $ rfb { rfbFB = fb { fbImage = im } }
  
-hGetPixelFormat :: RFB -> IO PixelFormat
-hGetPixelFormat rfb = do
-    let sock = rfbHandle rfb
-    [ bitsPerPixel, depth, bigEndian, trueColor ] <- hGetBytes sock 4
-    [ redMax, greenMax, blueMax ] <- hGetShorts sock 3 :: IO [Word16]
-    [ redShift, greenShift, blueShift ] <- hGetBytes sock 3
-    hGetBytes sock 3 -- padding
+parsePixelFormat :: ByteString -> PixelFormat
+parsePixelFormat = runGet $ do
+    [ bitsPerPixel, depth, bigEndian, trueColor ] <- replicateM 4 getWord8
+    [ redMax, greenMax, blueMax ] <- replicateM 3 getWord16be
+    [ redShift, greenShift, blueShift ] <- replicateM 3 getWord8
+    skip 3
     
     return $ PixelFormat {
         pfBitsPerPixel = bitsPerPixel, 
         pfDepth = depth,
         pfBigEndian = bigEndian /= 0,
         pfTrueColor = trueColor /= 0,
-        pfRedMax = endian (bigEndian /= 0) redMax,
-        pfGreenMax = endian (bigEndian /= 0) greenMax,
-        pfBlueMax = endian (bigEndian /= 0) blueMax,
+        pfRedMax = redMax,
+        pfGreenMax = greenMax,
+        pfBlueMax = blueMax,
         pfRedShift = redShift,
         pfGreenShift = greenShift,
         pfBlueShift = blueShift
     }
 
-hGetFrameBuffer :: RFB -> IO FrameBuffer
-hGetFrameBuffer rfb = do
-    let sock = rfbHandle rfb
-    [ width', height' ] <- (hGetWords sock 2 :: IO [Word16])
-    pf <- hGetPixelFormat rfb
-    let [ width, height ] = map (endian $ pfBigEndian pf) [ width', height' ]
-    
-    nameLen <- (endian $ pfBigEndian pf) <$> (hGetWord sock :: IO Word32)
-    name <- map toEnum <$> hGetBytes sock nameLen
-    im <- atomically =<< newTMVar <$> GD.newImage (width,height)
-    
-    return $ FrameBuffer {
-        fbWidth = width,
-        fbHeight = height,
-        fbPixelFormat = pf,
-        fbImage = im,
-        fbName = name
-    }
+parseFrameBuffer :: ByteString -> GetBytes FrameBuffer
+parseFrameBuffer = runGet $ do
+    [width, height] <- replicateM 2 getWord16be
+    pf <- parsePixelFormat =<< getBytes 16
+    size <- getWord32be
+    return $ GetBytes size $ do
+        name <- getBytes size
+        return $ FrameBuffer {
+            fbWidth = width,
+            fbHeight = height,
+            fbPixelFormat = pf,
+            fbImage = undefined,
+            fbName = name
+        }
 
 renderImage :: RFB -> Rectangle -> IO ()
 renderImage rfb rect = do
@@ -224,38 +216,41 @@ getImage :: RFB -> IO GD.Image
 getImage rfb = atomically $ readTMVar $ fbImage $ rfbFB rfb
 
 getUpdate :: RFB -> IO Update
-getUpdate rfb = do
-    let fb = rfbFB rfb
-    let sock = rfbHandle rfb
-    hPutBytes sock [ 3, 1 ]
-    hPutShorts sock $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
+getUpdate rfb@RFB{ rfbFB = fb, rfbHandle = sock } = do
+    hPut sock $ runPut $ do
+        mapM_ putWord8 [3,1]
+        mapM_ putWord16be $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
     hFlush sock
-    msgType <- hGetByte sock
-    case msgType of
-        0 -> do -- framebuffer update
-            hGetByte sock -- padding
-            rectLen <- endian' rfb <$> hGetWord16 sock
-            FrameBufferUpdate <$> replicateM rectLen (hGetRectangle rfb)
+    
+    (=<< hGet sock 1) $ \msgType -> case msgType of
+        0 -> (FrameBufferUpdate <$>) $ mapM runGetBytes
+            $ (<$> hGet sock 3) $ runGet $ do
+                skip 1
+                size <- getWord16be
+                replicateM size (parseRectangle rfb)
+        
         1 -> do -- color map update
             fail "color map not implemented"
             return ColorMapUpdate
+        
         2 -> do -- bell update
             fail "bell not implemented"
             return BellUpdate
+        
         3 -> do -- clipboard update
-            hGetBytes sock 3 -- padding
-            clip <- hGetBytes sock =<< hGetInt sock
+            hGet sock 3
+            clip <- hGet sock =<< (runGet getWord32be <$> hGet sock 4)
             return $ ClipboardUpdate clip
+        
+        _ -> fail $ "Unknown update message type: " ++ show msgType
 
-{-
-    You can import Graphics.X11.Types
-    and have access to all the xK_ Word32 constants.
--}
+-- | You can import Graphics.X11.Types and have access to all the xK_ Word32
+-- constants.
 sendKeyEvent :: RFB -> Bool -> Word32 -> IO ()
-sendKeyEvent rfb keyDown key = do
-    let sock = rfbHandle rfb
-    hPutBytes sock [ 4, toEnum $ fromEnum keyDown, 0, 0 ]
-    hPutWord sock (endian' rfb key :: Word32)
+sendKeyEvent RFB{ rfbHandle = sock } keyDown key = do
+    hPut sock =<< runPut $ do
+        mapM putWord8 [ 4, toEnum $ fromEnum keyDown, 0, 0 ]
+        putWord32be key
     hFlush sock
 
 sendKeyPress :: RFB -> Word32 -> IO ()
@@ -263,48 +258,52 @@ sendKeyPress rfb key =
     sendKeyEvent rfb True key >> sendKeyEvent rfb False key
 
 sendPointer :: RFB -> Word8 -> Word16 -> Word16 -> IO ()
-sendPointer rfb buttonMask x y = do
-    let sock = rfbHandle rfb
-    hPutWords sock [ 5, buttonMask ]
-    hPutWords sock [ x, y ]
-
-sendClipboard :: RFB -> [Word8] -> IO ()
-sendClipboard rfb clip = do
-    let sock = rfbHandle rfb
-    hPutBytes sock [ 6, 0, 0, 0 ]
-    hPutLong sock $ fromIntegral $ length clip
-    hPutWords sock clip
-
-setEncodings :: RFB -> [Word32] -> IO ()
-setEncodings rfb encodings = do
-    let sock = rfbHandle rfb
-    hPutBytes sock [ 2, 0 ]
-    hPutShort sock $ fromIntegral $ length encodings
-    hPutWords sock encodings
+sendPointer RFB{ rfbHandle = sock } buttonMask x y = do
+    hPut sock $ runPut $ do
+        mapM putWord8 [5,buttonMask]
+        mapM putWord16be [x,y]
     hFlush sock
 
-hGetRectangle :: RFB -> IO Rectangle
-hGetRectangle rfb = do
-    let
-        sock = rfbHandle rfb
-        pf = fbPixelFormat $ rfbFB rfb
+sendClipboard :: RFB -> ByteString -> IO ()
+sendClipboard RFB{ rfbHandle = sock } clip = do
+    hPut sock $ runPut $ do
+        mapM putWord8 [6,0,0,0]
+        putWord64be $ fromIntegral $ length clip
+        putByteString clip
+    hFlush sock
+
+setEncodings :: RFB -> [Int] -> IO ()
+setEncodings RFB{ rfbHandle = sock } encodings = do
+    hPut sock $ runPut $ do
+        mapM putWord8 [2,0]
+        putWord16be $ length encodings
+        putWord32be $ map ((2 ^ 32) -) encodings
+    hFlush sock
+
+parseRectangle :: RFB -> ByteString -> GetBytes Rectangle
+parseRectangle rfb = runGet $ do
+    let pf = fbPixelFormat $ rfbFB rfb
         bits = pfBitsPerPixel pf
+    [ dstX, dstY, w, h ] <- replicateM 4 getWord16be
     
-    [ x, y, w, h ] <- map (endian' rfb)
-        <$> (hGetWords sock 4 :: IO [Word16])
-    
-    encType <- hGetInt sock
-    encoding <- case encType of
+    GetBytes byteSize encodingM <- (=<< getWord32be) $ \x -> case x of
         0 -> do -- raw encoding
             case bits of
-                32 -> fmap RawEncoding . fromRGBA (w,h)
-                    =<< (hGetInts sock (w * h) :: IO [Word32])
-                    
+                32 -> GetBytes size $ RawEncoding <$> getBytes size
+                    where size = fromIntegral $ 4 * w * h
                 _ -> fail $ "unsupported bits per pixel: " ++ show bits
+        
+        1 -> do -- copy rectangle
+            [ srcX, srcY ] <- GetBytes 2 $
+                CopyRectEncoding <$> replicateM 2 getWord16be
+            return $ CopyRectEncoding (srcX,srcY)
+        
         _ -> fail "unsupported encoding"
     
-    return $ Rectangle {
-        rectPos = (x,y),
-        rectSize = (w,h),
-        rectEncoding = encoding
-    }
+    return $ GetBytes byteSize $ do
+        encoding <- encodingM
+        return $ GetBytes $ Rectangle {
+            rectPos = (dstX,dstY),
+            rectSize = (w,h),
+            rectEncoding = encoding
+        }
