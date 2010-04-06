@@ -12,15 +12,14 @@ import Control.Monad (when, unless, join, replicateM, foldM, msum, liftM2)
 
 import Data.Char (ord, chr)
 import qualified Data.Map as M
-import Data.List.Split (splitEvery)
+import Data.List.Split (chunk)
 
 import System.IO (Handle(..), hGetLine, hPutStrLn, hFlush)
-import Data.Binary.Get (
-    Get(..),runGet,skip,getBytes,getWord8,getWord16be,getWord32be)
-import Data.Binary.Put (
-    runPut,putWord8,putWord16be,putWord32be,putWord64be,putByteString)
+import Data.Binary.Get
+import Data.Binary.Put
 
 import Data.ByteString.Lazy (ByteString,hGet,hPut)
+import qualified Data.ByteString.Lazy as BS
 import Data.Word (Word8,Word16,Word32,Word64)
 
 import qualified Graphics.GD as GD
@@ -56,7 +55,7 @@ data FrameBuffer = FrameBuffer {
     fbHeight :: Int,
     fbPixelFormat :: PixelFormat,
     fbImage :: TMVar GD.Image,
-    fbName :: String
+    fbName :: ByteString
 }
 
 data RFB = RFB {
@@ -73,7 +72,7 @@ data Update =
     FrameBufferUpdate { rectangles :: [Rectangle] } |
     ColorMapUpdate |
     BellUpdate |
-    ClipboardUpdate [Word8]
+    ClipboardUpdate ByteString
 
 data Rectangle = Rectangle {
     rectPos :: GD.Point,
@@ -93,6 +92,12 @@ fromRGBA size@(w,h) pixels = do
     im <- GD.newImage size
     sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
     return im
+
+fromByteString :: GD.Size -> ByteString -> IO GD.Image
+fromByteString size = fromRGBA size . map f . chunk 4 . BS.unpack
+    where
+        f xs = g $ runPut $ mapM_ putWord8 xs
+        g = runGet $ getWord32be
 
 newRFB = RFB {
     rfbHandle = undefined,
@@ -128,12 +133,12 @@ versionHandshake rfb = do
 
 securityHandshake :: Handshake
 securityHandshake rfb@RFB{ rfbHandle = sock } = do
-    secLen <- hGet sock 1
-    secTypes <- hGet sock secLen
+    secLen <- fromIntegral . runGet getWord8 <$> hGet sock 1
+    secTypes <- BS.unpack <$> hGet sock secLen
     
     when (secLen == 0) $ do
-        msg <- map (toEnum . fromEnum)
-            <$> (hGet sock =<< hGet sock 1)
+        msgLen <- fromIntegral . runGet getWord8 <$> hGet sock 1
+        msg <- (map (toEnum . fromEnum) <$> BS.unpack) <$> hGet sock msgLen
         fail $ "Connection failed with message: " ++ msg
     
     let secNum = securityTypes M.! rfbSecurityType rfb
@@ -142,12 +147,14 @@ securityHandshake rfb@RFB{ rfbHandle = sock } = do
     unless (secNum `elem` secTypes) $ do
         fail "Authentication mode not supported on remote"
     
-    runPut (putWord8 secNum) >> hFlush sock
+    hPut sock $ runPut (putWord8 secNum)
+    hFlush sock
     
     -- note: < (3,8) doesn't send this for None
-    secRes <- runGet getWord32be =<< hGet sock 4
+    secRes <- runGet getWord32be <$> hGet sock 4
     when (secRes /= 0) $ do
-        msg <- map (toEnum . fromEnum) <$> (hGet sock =<< hGet sock 1)
+        msgLen <- fromIntegral . runGet getWord8 <$> hGet sock 1
+        msg <- (map (toEnum . fromEnum) <$> BS.unpack) <$> hGet sock msgLen
         fail $ "Security handshake failed with message: " ++ msg
     return rfb
 
@@ -155,18 +162,20 @@ initHandshake :: Handshake
 initHandshake rfb = do
     let sock = rfbHandle rfb
     -- client init sends whether or not to share the desktop
-    hPut sock (toEnum $ fromEnum $ rfbShared rfb) >> hFlush sock
+    hPut sock (BS.pack [toEnum $ fromEnum $ rfbShared rfb]) >> hFlush sock
     
     -- server init
-    fb <- runGetBytes =<< (parseFrameBuffer <$> hGet sock 24)
-    im <- atomically =<< newTMVar <$> GD.newImage (fbWidth &&& fbHeight $ fb)
-    return $ rfb { rfbFB = fb { fbImage = im } }
+    fb <- getFrameBuffer rfb
+    return $ rfb { rfbFB = fb }
  
 parsePixelFormat :: ByteString -> PixelFormat
 parsePixelFormat = runGet $ do
-    [ bitsPerPixel, depth, bigEndian, trueColor ] <- replicateM 4 getWord8
-    [ redMax, greenMax, blueMax ] <- replicateM 3 getWord16be
-    [ redShift, greenShift, blueShift ] <- replicateM 3 getWord8
+    [ bitsPerPixel, depth, bigEndian, trueColor ]
+        <- replicateM 4 (fromIntegral <$> getWord8)
+    [ redMax, greenMax, blueMax ]
+        <- replicateM 3 (fromIntegral <$> getWord16be)
+    [ redShift, greenShift, blueShift ]
+        <- replicateM 3 (fromIntegral <$> getWord8)
     skip 3
     
     return $ PixelFormat {
@@ -182,27 +191,29 @@ parsePixelFormat = runGet $ do
         pfBlueShift = blueShift
     }
 
-parseFrameBuffer :: ByteString -> GetBytes FrameBuffer
-parseFrameBuffer = runGet $ do
-    [width, height] <- replicateM 2 getWord16be
-    pf <- parsePixelFormat =<< getBytes 16
-    size <- getWord32be
-    return $ GetBytes size $ do
-        name <- getBytes size
-        return $ FrameBuffer {
-            fbWidth = width,
-            fbHeight = height,
-            fbPixelFormat = pf,
-            fbImage = undefined,
-            fbName = name
-        }
+getFrameBuffer :: RFB -> IO FrameBuffer
+getFrameBuffer RFB{ rfbHandle = sock } = do
+    [width, height] <- (<$> hGet sock 4)
+        $ runGet $ replicateM 2 (fromIntegral <$> getWord16be)
+    pf <- parsePixelFormat <$> hGet sock 16
+    size <- fromIntegral . runGet getWord32be <$> hGet sock 4
+    name <- hGet sock size
+    im <- atomically =<< newTMVar <$> GD.newImage (width,height)
+    return $ FrameBuffer {
+        fbWidth = width,
+        fbHeight = height,
+        fbPixelFormat = pf,
+        fbImage = im,
+        fbName = name
+    }
 
 renderImage :: RFB -> Rectangle -> IO ()
 renderImage rfb rect = do
     let fb = rfbFB rfb
+        tm = fbImage fb
     case rectEncoding rect of
-        RawEncoding { rawImage = srcIm } -> do
-            let tm = fbImage fb
+        RawEncoding { rawImage = rawIm } -> do
+            srcIm <- fromByteString (rectSize rect) rawIm
             dstIm <- atomically $ takeTMVar tm
             GD.copyRegion
                 (0,0) (rectSize rect) srcIm
@@ -222,9 +233,11 @@ getUpdate rfb@RFB{ rfbFB = fb, rfbHandle = sock } = do
         mapM_ putWord16be $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
     hFlush sock
     
-    (=<< hGet sock 1) $ \msgType -> case msgType of
+    msgType <- fromIntegral . runGet getWord8 <$> hGet sock 1
+    case msgType of
         0 -> do
-            rectSize <- (hGet sock 3 <$>) $ runGet $ skip 1 >> getWord16be
+            rectSize <- (<$> hGet sock 3)
+                $ fromIntegral . runGet (skip 1 >> getWord16be)
             FrameBufferUpdate <$> replicateM rectSize (getRectangle rfb)
         
         1 -> do -- color map update
@@ -237,7 +250,8 @@ getUpdate rfb@RFB{ rfbFB = fb, rfbHandle = sock } = do
         
         3 -> do -- clipboard update
             hGet sock 3
-            clip <- hGet sock =<< (runGet getWord32be <$> hGet sock 4)
+            clip <- hGet sock =<<
+                (fromIntegral . runGet getWord32be <$> hGet sock 4)
             return $ ClipboardUpdate clip
         
         _ -> fail $ "Unknown update message type: " ++ show msgType
@@ -246,7 +260,7 @@ getUpdate rfb@RFB{ rfbFB = fb, rfbHandle = sock } = do
 -- constants.
 sendKeyEvent :: RFB -> Bool -> Word32 -> IO ()
 sendKeyEvent RFB{ rfbHandle = sock } keyDown key = do
-    hPut sock =<< runPut $ do
+    hPut sock $ runPut $ do
         mapM putWord8 [ 4, toEnum $ fromEnum keyDown, 0, 0 ]
         putWord32be key
     hFlush sock
@@ -258,24 +272,24 @@ sendKeyPress rfb key =
 sendPointer :: RFB -> Word8 -> Word16 -> Word16 -> IO ()
 sendPointer RFB{ rfbHandle = sock } buttonMask x y = do
     hPut sock $ runPut $ do
-        mapM putWord8 [5,buttonMask]
-        mapM putWord16be [x,y]
+        mapM_ putWord8 [5,buttonMask]
+        mapM_ putWord16be [x,y]
     hFlush sock
 
-sendClipboard :: RFB -> ByteString -> IO ()
+sendClipboard :: RFB -> BS.ByteString -> IO ()
 sendClipboard RFB{ rfbHandle = sock } clip = do
     hPut sock $ runPut $ do
         mapM putWord8 [6,0,0,0]
-        putWord64be $ fromIntegral $ length clip
-        putByteString clip
+        putWord64be $ fromIntegral $ BS.length clip
+    hPut sock clip
     hFlush sock
 
 setEncodings :: RFB -> [Int] -> IO ()
 setEncodings RFB{ rfbHandle = sock } encodings = do
     hPut sock $ runPut $ do
         mapM putWord8 [2,0]
-        putWord16be $ length encodings
-        putWord32be $ map ((2 ^ 32) -) encodings
+        putWord16be $ fromIntegral $ length encodings
+        putWord32be $ fromIntegral $ sum $ map ((2 ^ 32) -) encodings
     hFlush sock
 
 getRectangle :: RFB -> IO Rectangle
