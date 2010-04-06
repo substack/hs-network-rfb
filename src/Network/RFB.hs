@@ -97,7 +97,7 @@ fromRGBA size@(w,h) pixels = do
 fromByteString :: GD.Size -> ByteString -> IO GD.Image
 fromByteString size = fromRGBA size . map f . chunk 4 . BS.unpack
     where
-        f xs = g $ runPut $ mapM_ putWord8 xs
+        f xs = g $ runPut $ mapM_ putWord8 (reverse xs)
         g = runGet $ getWord32be
 
 newRFB = RFB {
