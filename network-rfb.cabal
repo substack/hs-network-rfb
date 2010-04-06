@@ -4,7 +4,7 @@ Description:         Client library for the RFB protocol that VNC uses
 License:             BSD3
 Author:              James Halliday
 Maintainer:          substack@gmail.com
-Build-Depends:       base, network, gd, split, containers, stm
+Build-Depends:       base, network, gd, split, containers, stm, bytestring, binary
 Exposed-modules:     Network.RFB
 hs-source-dirs:      src
 Build-Type:          Simple
