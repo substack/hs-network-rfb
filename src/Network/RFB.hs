@@ -223,11 +223,9 @@ getUpdate rfb@RFB{ rfbFB = fb, rfbHandle = sock } = do
     hFlush sock
     
     (=<< hGet sock 1) $ \msgType -> case msgType of
-        0 -> (FrameBufferUpdate <$>) $ mapM runGetBytes
-            $ (<$> hGet sock 3) $ runGet $ do
-                skip 1
-                size <- getWord16be
-                replicateM size (parseRectangle rfb)
+        0 -> do
+            rectSize <- (hGet sock 3 <$>) $ runGet $ skip 1 >> getWord16be
+            FrameBufferUpdate <$> replicateM rectSize (getRectangle rfb)
         
         1 -> do -- color map update
             fail "color map not implemented"
@@ -280,30 +278,28 @@ setEncodings RFB{ rfbHandle = sock } encodings = do
         putWord32be $ map ((2 ^ 32) -) encodings
     hFlush sock
 
-parseRectangle :: RFB -> ByteString -> GetBytes Rectangle
-parseRectangle rfb = runGet $ do
+getRectangle :: RFB -> IO Rectangle
+getRectangle rfb@RFB{ rfbHandle = sock } = do
     let pf = fbPixelFormat $ rfbFB rfb
         bits = pfBitsPerPixel pf
-    [ dstX, dstY, w, h ] <- replicateM 4 getWord16be
     
-    GetBytes byteSize encodingM <- (=<< getWord32be) $ \x -> case x of
-        0 -> do -- raw encoding
-            case bits of
-                32 -> GetBytes size $ RawEncoding <$> getBytes size
-                    where size = fromIntegral $ 4 * w * h
-                _ -> fail $ "unsupported bits per pixel: " ++ show bits
-        
-        1 -> do -- copy rectangle
-            [ srcX, srcY ] <- GetBytes 2 $
-                CopyRectEncoding <$> replicateM 2 getWord16be
-            return $ CopyRectEncoding (srcX,srcY)
-        
-        _ -> fail "unsupported encoding"
-    
-    return $ GetBytes byteSize $ do
-        encoding <- encodingM
-        return $ GetBytes $ Rectangle {
+    rect <- (<$> hGet sock 8) $ runGet $ do
+        [ dstX, dstY, w, h ] <- map fromIntegral <$> replicateM 4 getWord16be
+        return $ Rectangle {
             rectPos = (dstX,dstY),
             rectSize = (w,h),
-            rectEncoding = encoding
+            rectEncoding = undefined
         }
+    
+    msgType <- (<$> hGet sock 4) $ runGet $ getWord32be
+    ((\x -> rect { rectEncoding = x }) <$>) $ case msgType of
+        0 -> case bits of
+            32 -> RawEncoding <$> hGet sock size
+                where size = fromIntegral $ 4 * (uncurry (*) $ rectSize rect)
+            _ -> fail $ "unsupported bits per pixel: " ++ show bits
+        
+        1 -> (<$> hGet sock 4) $ runGet $ do
+            [x,y] <- map fromIntegral <$> replicateM 2 getWord16be
+            return $ CopyRectEncoding (x,y)
+        
+        _ -> fail "unsupported encoding"
