@@ -3,6 +3,7 @@ module Network.RFB (
     Rectangle(..), Encoding(..), PortID(..),
     connect, connect', getUpdate, getImage, renderImage, renderImage', newRFB,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
+    fromRGBA, fromByteString,
 ) where
 
 import Network (connectTo, PortID(..), HostName)
