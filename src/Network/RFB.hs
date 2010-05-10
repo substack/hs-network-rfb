@@ -1,9 +1,8 @@
 module Network.RFB (
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
     Rectangle(..), Encoding(..), PortID(..),
-    connect, connect', getUpdate, getImage, renderImage, renderImages, newRFB,
+    connect, connect', getUpdate, newRFB,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
-    fromRGBA, fromByteString,
 ) where
 
 import Network (connectTo, PortID(..), HostName)
@@ -23,11 +22,13 @@ import Data.ByteString.Lazy (ByteString,hGet,hPut)
 import qualified Data.ByteString.Lazy as BS
 import Data.Word (Word8,Word16,Word32,Word64)
 
-import qualified Graphics.GD as GD
 import Foreign.C.Types (CInt)
 
 import Control.Concurrent.STM.TMVar
 import Control.Monad.STM (atomically)
+
+type Point = (Int,Int)
+type Size = (Int,Int)
 
 data GetBytes a = GetBytes Int (Get a)
 runGetBytes :: Handle -> GetBytes a -> IO a
@@ -52,10 +53,9 @@ data PixelFormat = PixelFormat {
 } deriving (Read, Show, Eq)
 
 data FrameBuffer = FrameBuffer {
-    fbWidth :: Int,
-    fbHeight :: Int,
+    fbSize :: (Int,Int),
     fbPixelFormat :: PixelFormat,
-    fbImage :: TMVar GD.Image,
+    fbImage :: ByteString,
     fbName :: ByteString
 }
 
@@ -69,36 +69,21 @@ data RFB = RFB {
     rfbShared :: Bool
 }
 
-data Update =
-    FrameBufferUpdate { rectangles :: [Rectangle] } |
-    ColorMapUpdate |
-    BellUpdate |
-    ClipboardUpdate ByteString
+data Update
+    = FrameBufferUpdate { rectangles :: [Rectangle] }
+    | ColorMapUpdate
+    | BellUpdate
+    | ClipboardUpdate ByteString
 
 data Rectangle = Rectangle {
-    rectPos :: GD.Point,
-    rectSize :: GD.Size,
+    rectPos :: Point,
+    rectSize :: Size,
     rectEncoding :: Encoding
 }
 
 data Encoding =
     RawEncoding { rawImage :: ByteString } |
-    CopyRectEncoding { copyRectPos :: GD.Point }
-
-fromRGBA :: GD.Size -> [Word32] -> IO GD.Image
-fromRGBA size@(w,h) pixels = do
-    let
-        xy = [ (x,y) | y <- [ 0 .. h - 1 ], x <- [ 0 .. w - 1 ] ]
-        px = map fromIntegral pixels :: [CInt]
-    im <- GD.newImage size
-    sequence_ [ GD.setPixel (x,y) p im | ((x,y),p) <- zip xy px ]
-    return im
-
-fromByteString :: GD.Size -> ByteString -> IO GD.Image
-fromByteString size = fromRGBA size . map f . chunk 4 . BS.unpack
-    where
-        f xs = g $ runPut $ mapM_ putWord8 (reverse xs)
-        g = runGet $ getWord32be
+    CopyRectEncoding { copyRectPos :: Point }
 
 newRFB = RFB {
     rfbHandle = undefined,
@@ -199,39 +184,19 @@ getFrameBuffer RFB{ rfbHandle = sock } = do
     pf <- parsePixelFormat <$> hGet sock 16
     size <- fromIntegral . runGet getWord32be <$> hGet sock 4
     name <- hGet sock size
-    im <- atomically =<< newTMVar <$> GD.newImage (width,height)
     return $ FrameBuffer {
-        fbWidth = width,
-        fbHeight = height,
+        fbSize = (width,height),
         fbPixelFormat = pf,
-        fbImage = im,
+        fbImage = BS.empty,
         fbName = name
     }
-
-renderImage :: RFB -> Rectangle -> IO ()
-renderImage rfb rect = do
-    let fb = rfbFB rfb
-        tm = fbImage fb
-    case rectEncoding rect of
-        RawEncoding { rawImage = rawIm } -> do
-            srcIm <- fromByteString (rectSize rect) rawIm
-            dstIm <- atomically $ takeTMVar tm
-            GD.copyRegion
-                (0,0) (rectSize rect) srcIm
-                (rectPos rect) dstIm
-            atomically $ putTMVar tm dstIm
-
-renderImages :: RFB -> [Rectangle] -> IO ()
-renderImages rfb = mapM_ (renderImage rfb)
-
-getImage :: RFB -> IO GD.Image
-getImage rfb = atomically $ readTMVar $ fbImage $ rfbFB rfb
 
 getUpdate :: RFB -> IO Update
 getUpdate rfb@RFB{ rfbFB = fb, rfbHandle = sock } = do
     hPut sock $ runPut $ do
         mapM_ putWord8 [3,1]
-        mapM_ putWord16be $ map fromIntegral [ 0, 0, fbWidth fb, fbHeight fb ]
+        let (width,height) = fbSize fb
+        mapM_ putWord16be $ map fromIntegral [ 0, 0, width, height ]
     hFlush sock
     
     msgType <- fromIntegral . runGet getWord8 <$> hGet sock 1
