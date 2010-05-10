@@ -1,7 +1,7 @@
 module Network.RFB (
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
     Rectangle(..), Encoding(..), PortID(..),
-    connect, connect', getUpdate, getImage, renderImage, renderImage', newRFB,
+    connect, connect', getUpdate, getImage, renderImage, renderImages, newRFB,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
     fromRGBA, fromByteString,
 ) where
@@ -221,8 +221,8 @@ renderImage rfb rect = do
                 (rectPos rect) dstIm
             atomically $ putTMVar tm dstIm
 
-renderImage' :: RFB -> [Rectangle] -> IO ()
-renderImage' rfb = mapM_ (renderImage rfb)
+renderImages :: RFB -> [Rectangle] -> IO ()
+renderImages rfb = mapM_ (renderImage rfb)
 
 getImage :: RFB -> IO GD.Image
 getImage rfb = atomically $ readTMVar $ fbImage $ rfbFB rfb
