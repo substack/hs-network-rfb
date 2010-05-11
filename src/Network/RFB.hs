@@ -13,15 +13,18 @@ import Control.Monad (when, unless, join, replicateM, foldM)
 import Data.Char (ord, chr)
 import qualified Data.Map as M
 
-import System.IO (Handle(..), hGetLine, hPutStrLn, hFlush)
+import System.IO (Handle(..),hGetLine,hPutStrLn,hFlush,hGetBuf)
 import Data.Binary.Get
 import Data.Binary.Put
 
 import qualified Data.ByteString.Lazy as BS
 import Data.Word (Word8,Word16,Word32,Word64)
 
+import Foreign (Ptr(..),mallocBytes)
+
 type Point = (Int,Int)
 type Size = (Int,Int)
+data RawImage = RawImage { imPtr :: Ptr Word32, imBytes :: Int }
 
 data GetBytes a = GetBytes Int (Get a)
 runGetBytes :: Handle -> GetBytes a -> IO a
@@ -48,7 +51,6 @@ data PixelFormat = PixelFormat {
 data FrameBuffer = FrameBuffer {
     fbSize :: (Int,Int),
     fbPixelFormat :: PixelFormat,
-    fbImage :: BS.ByteString,
     fbName :: BS.ByteString
 }
 
@@ -73,7 +75,7 @@ data Rectangle = Rectangle {
 }
 
 data Encoding
-    = RawEncoding { rawImage :: BS.ByteString }
+    = RawEncoding { rawImage :: RawImage }
     | CopyRectEncoding { copyRectPos :: Point }
 
 data Config = Config {
@@ -176,7 +178,6 @@ getFrameBuffer RFB{ rfbHandle = sock } = do
     return $ FrameBuffer {
         fbSize = (width,height),
         fbPixelFormat = pf,
-        fbImage = BS.empty,
         fbName = name
     }
 
@@ -252,19 +253,18 @@ getRectangle rfb@RFB{ rfbHandle = sock } = do
     let pf = fbPixelFormat $ rfbFB rfb
         bits = pfBitsPerPixel pf
     
-    rect <- (<$> BS.hGet sock 8) $ runGet $ do
-        [ dstX, dstY, w, h ] <- map fromIntegral <$> replicateM 4 getWord16be
-        return $ Rectangle {
-            rectPos = (dstX,dstY),
-            rectSize = (w,h),
-            rectEncoding = undefined
-        }
+    [ dstX, dstY, w, h ] <- (<$> BS.hGet sock 8) $ runGet
+        $ map fromIntegral <$> replicateM 4 getWord16be
     
-    msgType <- (<$> BS.hGet sock 4) $ runGet $ getWord32be
-    ((\x -> rect { rectEncoding = x }) <$>) $ case msgType of
+    msgType <- runGet getWord32be <$> BS.hGet sock 4
+    encoding <- case msgType of
         0 -> case bits of
-            32 -> RawEncoding <$> BS.hGet sock size
-                where size = fromIntegral $ 4 * (uncurry (*) $ rectSize rect)
+            32 -> do
+                let bytes = fromIntegral $ 4 * w * h
+                ptr <- mallocBytes bytes
+                bytesRead <- hGetBuf sock ptr bytes
+                when (bytesRead /= bytes) $ fail "EOF in RawEncoding"
+                return $ RawEncoding { rawImage = RawImage ptr bytes }
             _ -> fail $ "unsupported bits per pixel: " ++ show bits
         
         1 -> (<$> BS.hGet sock 4) $ runGet $ do
@@ -272,3 +272,9 @@ getRectangle rfb@RFB{ rfbHandle = sock } = do
             return $ CopyRectEncoding (x,y)
         
         _ -> fail "unsupported encoding"
+    
+    return $ Rectangle {
+        rectPos = (dstX,dstY),
+        rectSize = (w,h),
+        rectEncoding = encoding
+    }
