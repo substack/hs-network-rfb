@@ -1,7 +1,7 @@
 module Network.RFB (
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
     Config(..), Rectangle(..), Encoding(..),
-    connect, getUpdate,
+    connect, simpleConnect, getUpdate,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
 ) where
 
@@ -95,6 +95,8 @@ connect config host port = do
         cShared = shared config
     foldM (flip ($)) rfb { rfbHandle = sock }
         [ versionHandshake, securityHandshake, initHandshake ]
+
+simpleConnect = connect defaultConfig
 
 type Handshake = RFB -> IO RFB
 
