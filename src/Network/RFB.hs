@@ -1,6 +1,6 @@
 module Network.RFB (
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
-    Config(..), Rectangle(..), Encoding(..), RawImage,
+    Config(..), Rectangle(..), Encoding(..),
     connect, simpleConnect, getUpdate,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
 ) where
@@ -74,10 +74,8 @@ data Rectangle = Rectangle {
 }
 
 data Encoding
-    = RawEncoding { rawImage :: RawImage }
+    = RawEncoding { rawPtr :: Ptr Word32, rawBytes :: Int }
     | CopyRectEncoding { copyRectPos :: Point }
-
-data RawImage = RawImage { imPtr :: Ptr Word32, imBytes :: Int }
 
 data Config = Config {
    shared :: Bool,
@@ -268,7 +266,7 @@ getRectangle rfb@RFB{ rfbHandle = sock } = do
                 ptr <- mallocBytes bytes
                 bytesRead <- hGetBuf sock ptr bytes
                 when (bytesRead /= bytes) $ fail "EOF in RawEncoding"
-                return $ RawEncoding { rawImage = RawImage ptr bytes }
+                return $ RawEncoding ptr bytes
             _ -> fail $ "unsupported bits per pixel: " ++ show bits
         
         1 -> (<$> BS.hGet sock 4) $ runGet $ do
