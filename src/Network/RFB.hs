@@ -74,7 +74,7 @@ data Rectangle = Rectangle {
 }
 
 data Encoding
-    = RawEncoding { rawPtr :: Ptr Word32, rawBytes :: Int }
+    = RawEncoding { rawPtr :: Ptr Word8, rawBytes :: Int }
     | CopyRectEncoding { copyRectPos :: Point }
 
 data Config = Config {
