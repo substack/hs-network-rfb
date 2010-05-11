@@ -1,6 +1,6 @@
 module Network.RFB (
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
-    Config(..), Rectangle(..), Encoding(..),
+    Config(..), Rectangle(..), Encoding(..), RawImage,
     connect, simpleConnect, getUpdate,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
 ) where
@@ -24,7 +24,6 @@ import Foreign (Ptr(..),mallocBytes)
 
 type Point = (Int,Int)
 type Size = (Int,Int)
-data RawImage = RawImage { imPtr :: Ptr Word32, imBytes :: Int }
 
 data GetBytes a = GetBytes Int (Get a)
 runGetBytes :: Handle -> GetBytes a -> IO a
@@ -78,6 +77,8 @@ data Encoding
     = RawEncoding { rawImage :: RawImage }
     | CopyRectEncoding { copyRectPos :: Point }
 
+data RawImage = RawImage { imPtr :: Ptr Word32, imBytes :: Int }
+
 data Config = Config {
    shared :: Bool,
    securityType :: SecurityType
@@ -96,7 +97,8 @@ connect config host port = do
     foldM (flip ($)) rfb { rfbHandle = sock }
         [ versionHandshake, securityHandshake, initHandshake ]
 
-simpleConnect = connect defaultConfig
+simpleConnect :: HostName -> Word16 -> IO RFB
+simpleConnect host port = connect defaultConfig host (PortNumber $ fromIntegral port)
 
 type Handshake = RFB -> IO RFB
 
