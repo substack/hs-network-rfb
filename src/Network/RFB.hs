@@ -1,7 +1,7 @@
 module Network.RFB (
     SecurityType(..), PixelFormat(..), FrameBuffer(..), RFB(..), Update(..),
     Config(..), Rectangle(..), Encoding(..),
-    connect, simpleConnect, getUpdate,
+    connect, simpleConnect, getUpdate, requestFrameBuffer,
     sendKeyEvent, sendKeyPress, sendPointer, sendClipboard, setEncodings,
 ) where
 
@@ -248,6 +248,15 @@ setEncodings RFB{ rfbHandle = sock } encodings = do
         mapM putWord8 [2,0]
         putWord16be $ fromIntegral $ length encodings
         putWord32be $ fromIntegral $ sum $ map ((2 ^ 32) -) encodings
+    hFlush sock
+
+requestFrameBuffer :: RFB -> Word16 -> Word16 -> Word16 -> Word16 -> IO ()
+requestFrameBuffer RFB{ rfbHandle = sock } x y w h = do
+    BS.hPut sock $ runPut $ do
+        putWord8 3 -- message type
+        putWord8 0 -- incremental
+        mapM_ putWord16be [x,y] -- position
+        mapM_ putWord16be [w,h] -- size
     hFlush sock
 
 getRectangle :: RFB -> IO Rectangle
